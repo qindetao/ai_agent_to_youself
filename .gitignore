@@ -1,0 +1,60 @@
+# ===== 密钥 / 敏感信息（最重要，泄漏=全网公开）=====
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+config.local.*
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.so
+build/
+dist/
+*.egg-info/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== 测试 / 缓存 =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 前端（Web 目录）=====
+node_modules/
+.next/
+out/
+*.log
+npm-debug.log*
+
+# ===== 模型 / 数据（体积大，不进 Git）=====
+models/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+data/raw/
+*.sqlite
+*.db
+vectorstore/
+chroma_db/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
