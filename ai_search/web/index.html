@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AI 搜索助手</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header><p class="eyebrow">AI SEARCH</p><h1>答案有出处，判断有依据</h1>
+    <p>检索网页，逐条查看证据、来源关系与时间版本适用性。</p></header>
+  <form id="search-form">
+    <label for="question">你想查询什么？</label>
+    <textarea id="question" required maxlength="2000" rows="3" placeholder="例如：Python 3.10 中 asyncio.run 支持哪些参数？"></textarea>
+    <div class="options">
+      <label>参考日期<input id="as-of" type="date"><small>留空使用北京时间当天</small></label>
+      <label>目标版本<input id="version" maxlength="100" placeholder="可选，例如 3.10"></label>
+      <label>回答语言<select id="language"><option value="zh">中文</option><option value="en">English</option></select></label>
+      <label>搜索轮数<select id="rounds"><option value="2">最多 2 轮</option><option value="1">最多 1 轮</option></select></label>
+    </div>
+    <button id="submit" type="submit">搜索并核验</button>
+    <p id="progress" role="status" aria-live="polite"></p>
+    <p id="error" role="alert" hidden></p>
+  </form>
+  <section id="result" hidden aria-label="查询结果">
+    <div class="section-title"><h2>查询结果</h2><div><button id="download-markdown" type="button" class="secondary">导出 Markdown</button> <button id="download" type="button" class="secondary">下载结果 JSON</button></div></div>
+    <p id="summary" class="muted"></p>
+    <p class="note">支持状态反映证据充分程度，不代表正确概率。网页日期和抓取时间不能直接证明信息目前适用。</p>
+    <h3>回答</h3><div id="answer" class="answer"></div>
+    <h3>逐条核验</h3><div id="claims"></div>
+    <form id="follow-up-form" class="follow-up-form">
+      <label for="follow-up-question">继续追问</label>
+      <textarea id="follow-up-question" maxlength="2000" rows="2" placeholder="例如：刚才提到的参数在 Windows 上也一样吗？"></textarea>
+      <button id="follow-up-submit" type="submit" class="secondary">结合上次结果重新搜索</button>
+      <small>上一轮内容只用于理解你的追问；新回答会重新检索来源，不会把旧回答当证据。</small>
+    </form>
+    <h3>来源</h3><div id="sources"></div>
+    <h3>来源关系</h3><p class="muted">高度相似的网页可能同源；不同组也不保证相互独立。</p><div id="groups"></div>
+    <h3>本次查询的限制</h3><ul id="limitations"></ul>
+    <details id="feedback-panel"><summary>提交改进反馈</summary>
+      <p class="muted">反馈只会整理成一个本地下载的待复核测试案例，不会自动上传或加入正式测试集。</p>
+      <label for="feedback-type">反馈类型<select id="feedback-type"><option value="unsupported">引用不支持结论</option><option value="wrong">事实错误</option><option value="missing_source">缺少重要来源</option><option value="wrong_version">版本或时效不对</option><option value="other">其他</option></select></label>
+      <label for="feedback-note">说明<textarea id="feedback-note" maxlength="2000" rows="3" placeholder="指出哪条结论有问题，以及你认为应该核对什么"></textarea></label>
+      <button id="download-feedback" type="button" class="secondary">下载待复核案例</button>
+    </details>
+    <details><summary>查看调用统计</summary><pre id="usage"></pre></details>
+  </section>
+  <footer>完整服务测试页面 · <a href="/docs">接口文档</a></footer>
+</main>
+</body></html>
