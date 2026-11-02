@@ -69,7 +69,7 @@ async def search_from_backend(question: str):
 
 | 字段 | 含义 |
 |---|---|
-| answer | 按核验结论直接拼接的文本，引用形如 [S1] |
+| answer | 按阅读顺序拼接的回答正文，句末保留证据支持标记及 [S1] 等引用；核验理由保存在 claims 中 |
 | claims | text、status、reason、逐条拆分的 fact_checks，以及 evidence 中的 source_id 和逐字 quote；事实引用用 relation 区分支持、反驳和背景；temporal.requires_check 表示该条结论是否需要时效/版本核验 |
 | sources | 来源 ID、标题、URL、发布日期（可能缺失）、抓取时间、实际提供给模型的 content |
 | source_groups | 可能同源的正文分组，包含 source_ids、状态与两两相似度依据 |
@@ -105,6 +105,14 @@ status 为 `supported`、`partial`、`conflicting`、`insufficient`。来源只�
 
 生成与审核均优先引用相关原始资料；厂商成绩明确标注自报，仍需独立证据支持比较结论，不能以官方身份覆盖反证。该策略不额外增加搜索调用次数。真实检索效果仍取决于供应商索引与问题，不能保证每次都取得官方资料。
 
+### 搜索历史与历史总结
+
+网页自动把最近20次成功结果保存在当前浏览器的 IndexedDB 中，包括问题、回答、逐句证据和原始来源。追问不会覆盖旧版；点击“返回此版”可恢复当时的快照，刷新仍可继续查看。记录不会跨浏览器同步，清理浏览器数据也会删除记录。
+
+可选择1至5条历史记录：“总结选中记录”调用模型整理已有资料，不重新联网；“结合选中记录重新搜索”用这些记录帮助理解问题，并重新检索核验。两种操作都会保存为新版本。可在“整理要求或下一步问题”中指定要整理时间线、变化或分歧。
+
+历史总结接口为 `POST /v1/ai-search/summarize`，请求包含 `records`（每项为 `record_id`、`question`、`result`）、可选 `instruction` 和 `language`。接口重映射来源编号、核对引用，保留不同参考日期；返回 `result_kind=history_summary`、`history_reference_dates`，`search_rounds=0`。汇总不代表重新确认信息最新，也不会因为多份旧答案重复相同说法就提高确定性。该接口与搜索接口一样，正式部署需接入后端鉴权和限流。
+
 ### 时效性和版本核验
 
 示例请求：
@@ -131,7 +139,7 @@ status 为 `supported`、`partial`、`conflicting`、`insufficient`。来源只�
 | version_mismatch | 证据标明的适用版本与指定目标版本不匹配 |
 | uncertain | 证据不足，或引用、日期、版本、替代关系未通过校验 |
 
-时效和版本信息同时显示在 answer 中。模型对每条结论分别填写 temporal.requires_check；问题涉及日期或版本时仍会触发相应核验，显式 as_of 或 target_version 会要求对结论核验。稳定概念可以选择不涉及时间版本核验，避免整份答案被统一降为 uncertain。证据缺口触发下一轮官方更新/生效日期检索，仍受 max_search_rounds 上限控制。
+时效和版本信息保存在 claims[].temporal 中，网页点击回答句子后可查看；answer 正文不再混入核验理由和时间检查报告。模型对每条结论分别填写 temporal.requires_check；问题涉及日期或版本时仍会触发相应核验，显式 as_of 或 target_version 会要求对结论核验。稳定概念可以选择不涉及时间版本核验，避免整份答案被统一降为 uncertain。证据缺口触发下一轮官方更新/生效日期检索，仍受 max_search_rounds 上限控制。
 
 程序验证来源ID、正文逐字引用、完整数字或中文年月日、版本字符串边界，以及生效区间和参考日期关系。指定版本时也检查官方文档 URL 中明确标出的版本路径；例如 Django 5.2 文档不能单独确认 Django 6.0 的事实。匹配的官方文档引用可标为 `version_confirmed`，它只说明版本范围对上，不自动证明结论语义正确。版本按精确字符串匹配，不按大小排序，也不自动推断 semver 兼容范围。3.1 不会被当作 3.10 的证据；无法从 URL 确认文档版本的页面，仍要求正文证据明确匹配目标版本。
 

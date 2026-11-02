@@ -10,7 +10,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import SearchRequest, SearchResponse
+from .models import HistorySummaryRequest, SearchRequest, SearchResponse
+from .history import summarize_history
 from .providers import DeepSeek, ProviderError, Tavily, request_id_context, retry_count_context
 from .service import SearchService
 
@@ -32,7 +33,7 @@ app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 @app.get("/", include_in_schema=False)
 async def search_page():
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/health")
@@ -42,11 +43,20 @@ async def health():
 
 @app.post("/v1/ai-search", response_model=SearchResponse)
 async def ai_search(payload: SearchRequest, request: Request):
+    return await run_operation(lambda: request.app.state.search_service.search(payload))
+
+
+@app.post("/v1/ai-search/summarize", response_model=SearchResponse)
+async def history_summary(payload: HistorySummaryRequest, request: Request):
+    return await run_operation(lambda: summarize_history(request.app.state.search_service.llm, payload))
+
+
+async def run_operation(operation):
     request_id = secrets.token_hex(6)
     token = request_id_context.set(request_id)
     retry_token = retry_count_context.set([0])
     try:
-        result = await asyncio.wait_for(request.app.state.search_service.search(payload), timeout=210)
+        result = await asyncio.wait_for(operation(), timeout=210)
         return result
     except asyncio.TimeoutError as exc:
         retry_count = retry_count_context.get()[0]

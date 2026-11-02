@@ -4,10 +4,11 @@ import os
 import time
 import asyncio
 from contextvars import ContextVar
-from typing import TypeVar
+from typing import TypeVar, get_args
 
 import httpx
 from pydantic import BaseModel, ValidationError
+from .models import FactCheck
 
 T = TypeVar("T", bound=BaseModel)
 logger = logging.getLogger(__name__)
@@ -137,6 +138,55 @@ def _log_failure(error: ProviderError, started: float, error_type: str = "-") ->
                    int((time.perf_counter() - started) * 1000))
 
 
+def discard_short_quotes(parsed: object) -> int:
+    """Discard unusably short evidence; the service will downgrade unsupported facts."""
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("claims"), list):
+        return 0
+    removed = 0
+
+    def clean(container, key):
+        nonlocal removed
+        if not isinstance(container, dict) or not isinstance(container.get(key), list):
+            return
+        kept = []
+        for item in container[key]:
+            quote = item.get("quote") if isinstance(item, dict) else None
+            if isinstance(quote, str) and len(quote.strip()) < 12:
+                removed += 1
+            else:
+                kept.append(item)
+        container[key] = kept
+
+    for claim in parsed["claims"]:
+        if not isinstance(claim, dict):
+            continue
+        clean(claim, "evidence")
+        facts = claim.get("fact_checks", [])
+        if isinstance(facts, list):
+            for fact in facts:
+                clean(fact, "evidence")
+        clean(claim.get("temporal"), "facts")
+    return removed
+
+
+def downgrade_unknown_fact_statuses(parsed: object) -> int:
+    """An invalid per-fact status is uncertainty, never evidence of support."""
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("claims"), list):
+        return 0
+    allowed = get_args(FactCheck.model_fields["status"].annotation)
+    changed = 0
+    for claim in parsed["claims"]:
+        facts = claim.get("fact_checks") if isinstance(claim, dict) else None
+        if not isinstance(facts, list):
+            continue
+        for fact in facts:
+            status = fact.get("status") if isinstance(fact, dict) else None
+            if isinstance(status, str) and status.strip() not in allowed:
+                fact["status"] = "uncertain"
+                changed += 1
+    return changed
+
+
 class DeepSeek:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
@@ -183,15 +233,38 @@ class DeepSeek:
                 content = choice["message"]["content"]
                 failure_kind = "invalid_json"
                 parsed = json.loads(content)
+                discarded = discard_short_quotes(parsed)
+                downgraded = downgrade_unknown_fact_statuses(parsed)
+                if downgraded:
+                    logger.warning("model_fact_statuses_downgraded request_id=%s schema=%s count=%d",
+                                   request_id_context.get(), schema.__name__, downgraded)
+                if discarded:
+                    logger.warning("model_short_quotes_discarded request_id=%s schema=%s count=%d",
+                                   request_id_context.get(), schema.__name__, discarded)
                 failure_kind = "schema_validation"
                 return schema.model_validate(parsed)
             except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+                validation_hints = []
+                if isinstance(exc, ValidationError):
+                    definition = schema.model_json_schema()
+                    field_names = set(definition.get("properties", {}))
+                    for nested in definition.get("$defs", {}).values():
+                        field_names.update(nested.get("properties", {}))
+                    for error in exc.errors(include_input=False)[:12]:
+                        path = ".".join(str(part) if isinstance(part, int) or part in field_names else "<unknown>"
+                                        for part in error.get("loc", ()))
+                        validation_hints.append({"path": path, "error": error.get("type", "invalid")})
+                logger.warning("model_output_validation request_id=%s schema=%s attempt=%d kind=%s issues=%s",
+                               request_id_context.get(), schema.__name__, repair_attempt + 1, failure_kind,
+                               json.dumps(validation_hints, ensure_ascii=True))
                 if repair_attempt == 0:
                     _record_retry("deepseek", "chat_completions", f"output_{failure_kind}", 1, 0)
                     usage["llm_calls"] = usage.get("llm_calls", 1) + 1
                     prompt += (
                         "\n上一次回复未通过程序校验。请重新检查必填字段、字段类型、枚举值和长度限制；"
-                        "只返回完整、有效的JSON对象，不添加Markdown或解释。内容简洁，确保在token限制内结束。"
+                        "具体校验问题如下：" + json.dumps(validation_hints, ensure_ascii=False)
+                        + "。请修复这些位置，只返回完整、有效的JSON对象，不添加Markdown或解释。"
+                        "内容简洁，确保在token限制内结束。"
                     )
                     continue
                 logger.warning("provider_failure request_id=%s provider=deepseek operation=chat_completions category=invalid_model_output failure_kind=%s",

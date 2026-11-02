@@ -1,7 +1,7 @@
 from typing import Literal
 from datetime import date
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -118,3 +118,30 @@ class SearchResponse(StrictModel):
     source_groups: list[SourceGroup] = Field(default_factory=list)
     checked_as_of: date | None = None
     target_version: str | None = None
+    result_kind: Literal["search", "history_summary"] = "search"
+    history_reference_dates: list[date] = Field(default_factory=list)
+
+
+class HistoryRecord(StrictModel):
+    record_id: str = Field(min_length=1, max_length=80)
+    question: str = Field(min_length=1, max_length=2000)
+    result: SearchResponse
+
+
+class HistorySummaryRequest(StrictModel):
+    records: list[HistoryRecord] = Field(min_length=1, max_length=5)
+    instruction: str = Field(default="请综合这些记录，去除重复，保留差异与不确定性，给出一份连贯概览。", max_length=2000)
+    language: Literal["zh", "en"] = "zh"
+
+    @model_validator(mode="after")
+    def limit_saved_material(self):
+        if len({r.record_id for r in self.records}) != len(self.records):
+            raise ValueError("请选择不同的历史记录")
+        if sum(len(r.result.sources) for r in self.records) > 40:
+            raise ValueError("选中记录包含过多来源，请减少记录数量")
+        if len(self.model_dump_json()) > 400000:
+            raise ValueError("历史记录过大，请减少选中数量")
+        for record in self.records:
+            if len({s.id for s in record.result.sources}) != len(record.result.sources):
+                raise ValueError("历史记录包含重复来源编号")
+        return self

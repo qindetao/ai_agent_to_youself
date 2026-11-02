@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AI 搜索助手</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=history-20261103-1">
+  <script src="/static/history.js?v=history-20261103-1" defer></script>
+  <script src="/static/app.js?v=history-20261103-1" defer></script>
 </head>
 <body>
 <main>
@@ -23,21 +24,32 @@
     <p id="progress" role="status" aria-live="polite"></p>
     <p id="error" role="alert" hidden></p>
   </form>
+  <section id="history-panel" class="history-panel" aria-labelledby="history-title">
+    <div class="section-title"><h2 id="history-title">搜索历史</h2><button id="clear-history" type="button" class="secondary">清空历史</button></div>
+    <p class="muted">自动保存最近 20 个版本到当前浏览器。可随时返回旧版，或选择 1–5 条一起整理。</p>
+    <p id="history-notice" role="status" class="muted"></p>
+    <div id="history-list"></div>
+    <label for="history-instruction">整理要求或下一步问题</label>
+    <textarea id="history-instruction" rows="2" maxlength="2000" placeholder="可留空，例如：把这些资料整理成时间线，指出不同版本的变化"></textarea>
+    <div class="history-actions"><button id="summarize-history" type="button" class="secondary" disabled>总结选中记录</button><button id="search-history" type="button" class="secondary" disabled>结合选中记录重新搜索</button></div>
+    <small>直接总结仅调用模型整理历史证据；重新搜索会联网核验。两种结果都会另存为新版本。</small>
+  </section>
   <section id="result" hidden aria-label="查询结果">
     <div class="section-title"><h2>查询结果</h2><div><button id="download-markdown" type="button" class="secondary">导出 Markdown</button> <button id="download" type="button" class="secondary">下载结果 JSON</button></div></div>
     <p id="summary" class="muted"></p>
-    <p class="note">支持状态反映证据充分程度，不代表正确概率。网页日期和抓取时间不能直接证明信息目前适用。</p>
-    <h3>回答</h3><div id="answer" class="answer"></div>
-    <h3>逐条核验</h3><div id="claims"></div>
+    <p id="current-version" class="muted"></p>
+    <p class="answer-hint">句末标记表示证据支持程度。点击任意一句，查看来源与原文依据。</p>
+    <div id="answer" class="answer" aria-label="回答"></div>
+    <div id="claims" hidden></div>
     <form id="follow-up-form" class="follow-up-form">
       <label for="follow-up-question">继续追问</label>
       <textarea id="follow-up-question" maxlength="2000" rows="2" placeholder="例如：刚才提到的参数在 Windows 上也一样吗？"></textarea>
       <button id="follow-up-submit" type="submit" class="secondary">结合上次结果重新搜索</button>
       <small>上一轮内容只用于理解你的追问；新回答会重新检索来源，不会把旧回答当证据。</small>
     </form>
-    <h3>来源</h3><div id="sources"></div>
-    <h3>来源关系</h3><p class="muted">高度相似的网页可能同源；不同组也不保证相互独立。</p><div id="groups"></div>
-    <h3>本次查询的限制</h3><ul id="limitations"></ul>
+    <details><summary>全部来源</summary><div id="sources"></div></details>
+    <details><summary>来源关系</summary><p class="muted">高度相似的网页可能同源；不同组也不保证相互独立。</p><div id="groups"></div></details>
+    <details><summary>查询说明与限制</summary><ul id="limitations"></ul></details>
     <details id="feedback-panel"><summary>提交改进反馈</summary>
       <p class="muted">反馈只会整理成一个本地下载的待复核测试案例，不会自动上传或加入正式测试集。</p>
       <label for="feedback-type">反馈类型<select id="feedback-type"><option value="unsupported">引用不支持结论</option><option value="wrong">事实错误</option><option value="missing_source">缺少重要来源</option><option value="wrong_version">版本或时效不对</option><option value="other">其他</option></select></label>
@@ -48,4 +60,9 @@
   </section>
   <footer>完整服务测试页面 · <a href="/docs">接口文档</a></footer>
 </main>
+<dialog id="evidence-dialog" aria-labelledby="evidence-title">
+  <div class="evidence-header"><h2 id="evidence-title">回答依据</h2><button id="close-evidence" type="button" class="secondary" aria-label="关闭来源详情">关闭</button></div>
+  <p class="muted">标记表示这条结论的证据充分程度，不是正确概率。日期适用性单独核验。</p>
+  <div id="evidence-content"></div>
+</dialog>
 </body></html>

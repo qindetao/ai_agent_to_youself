@@ -18,6 +18,8 @@ TEMPORAL_INSTRUCTION = (
     "网页日期更新、版本号更大或两份公告结论不同，都不能单独证明替代关系。"
     "只有明确适用范围/生效区间支持参考日期时才能applicable_as_of，不代表全网最新。"
     "仅有过去事件日期可historical，不等于已过期。明确失效或尚未生效的内容不得作为参考日期的现行结论。"
+    "案件或事件概览中，已经发生的起诉、判决、公布文件等分别按event_date核验并标为historical；"
+    "不要要求历史事件提供effective_from生效区间。当前案件进展与历史事实分开写，不能用历史日期证明当前状态。"
     "目标版本与适用版本明确不同时version_mismatch；如果引用的原始官方文档直接覆盖目标版本，且引文包含该版本，标记version_confirmed。"
     "version_confirmed仅表示版本范围得到官方原文支持，不代表结论的其他事实自动正确。"
     "真正与时间版本无关的稳定解释可not_assessed；价格、最新消息、API参数不得用not_assessed绕过核验。"
@@ -72,6 +74,25 @@ def date_in_quote(value: str, quote: str) -> bool:
                 return True
         except ValueError:
             pass
+    months = {name: i for i, name in enumerate((
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december",
+    ), 1)}
+    aliases = {name[:3]: number for name, number in months.items()}
+    months.update(aliases)
+    month_pattern = "(?:" + "|".join(sorted(months, key=len, reverse=True)) + r")\.?"
+    patterns = (
+        (rf"\b({month_pattern})\s+(\d{{1,2}})(?:st|nd|rd|th)?[,]?\s+(\d{{4}})\b", False),
+        (rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_pattern})[,]?\s+(\d{{4}})\b", True),
+    )
+    for pattern, day_first in patterns:
+        for first, second, year in re.findall(pattern, quote, re.IGNORECASE):
+            month, day = (second, first) if day_first else (first, second)
+            try:
+                if date(int(year), months[month.lower().rstrip(".")], int(day)) == parsed:
+                    return True
+            except ValueError:
+                pass
     return False
 
 
@@ -81,6 +102,17 @@ def is_time_sensitive(question: str) -> bool:
 
 def is_date_sensitive(question: str) -> bool:
     return bool(re.search(r"最新|目前|当前|现在|今天|新闻|消息|价格|收费|生效|发布日期|发布于|公告|\b(latest|current|today|news|pricing|price|effective|release)\b", question, re.IGNORECASE))
+
+
+def extract_reference_date(question: str) -> date | None:
+    """Use an explicit as-of/cutoff date in the question as the temporal baseline."""
+    pattern = r"(?:截至|截止(?:日期)?(?:为|到)?|参考日期(?:为|是)?|as\s+of)\s*(20\d{2})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*日?"
+    for year, month, day in re.findall(pattern, question, re.IGNORECASE):
+        try:
+            return date(int(year), int(month), int(day))
+        except ValueError:
+            continue
+    return None
 
 
 def check_temporal(claims: list[Claim], sources: list[Source], request: SearchRequest, as_of: date, require_assessment: bool = False) -> list[Claim]:

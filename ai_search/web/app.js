@@ -12,8 +12,109 @@ const labels = {
   community_or_blog:"社区/博客",other:"其他页面",page_extract:"网页正文",search_snippet:"搜索摘要"
 };
 const relationLabels = {supports:"支持",contradicts:"反驳",context:"相关背景"};
+$("close-evidence").addEventListener("click",() => $("evidence-dialog").close());
+$("evidence-dialog").addEventListener("click",event => {
+  if (event.target === $("evidence-dialog")) $("evidence-dialog").close();
+});
 let lastResult = null;
 let lastQuestion = "";
+let historyRecords = [];
+let activeRecordId = null;
+let busy = false;
+let historyStorageAvailable = true;
+let selectedRecords = new Set();
+function rememberActiveVersion(id) {
+  try {
+    if (id) sessionStorage.setItem("ai-search-active-version",id);
+    else sessionStorage.removeItem("ai-search-active-version");
+  } catch { /* Snapshot persistence still works if session storage is unavailable. */ }
+}
+
+function chosenHistory() {
+  return historyRecords.filter(record => selectedRecords.has(record.id)).sort((a,b) => a.sequence-b.sequence);
+}
+function updateVersionLabel() {
+  const record = historyRecords.find(item => item.id === activeRecordId);
+  $("current-version").textContent = record
+    ? `正在查看版本 ${record.sequence} · ${record.parents.length ? `基于版本 ${record.parents.map(p => p.sequence).join("、")} · ` : ""}${new Date(record.createdAt).toLocaleString()}` : "";
+}
+function renderHistory() {
+  $("history-list").replaceChildren();
+  if (!historyRecords.length) el("p","完成一次查询后，结果会保存在这里。",$("history-list"),"muted");
+  for (const record of historyRecords) {
+    const row = el("div",null,$("history-list"),`history-row${record.id === activeRecordId ? " history-active" : ""}`);
+    const label = el("label",null,row,"history-select");
+    const checkbox = el("input",null,label);
+    checkbox.type = "checkbox";
+    checkbox.checked = selectedRecords.has(record.id);
+    checkbox.disabled = busy;
+    checkbox.addEventListener("change",() => {
+      if (checkbox.checked) selectedRecords.add(record.id); else selectedRecords.delete(record.id);
+      renderHistory();
+    });
+    const text = el("span",null,label);
+    el("strong",`版本 ${record.sequence} · ${record.result.result_kind === "history_summary" ? "历史总结" : "搜索结果"}`,text);
+    el("span",record.question,text,"history-question");
+    el("small",new Date(record.createdAt).toLocaleString(),text);
+    const restore = el("button",record.id === activeRecordId ? "当前版本" : "返回此版",row,"secondary");
+    restore.type = "button";
+    restore.disabled = busy || record.id === activeRecordId;
+    restore.addEventListener("click",() => restoreHistory(record));
+  }
+  const count = chosenHistory().length;
+  for (const id of ["summarize-history","search-history"]) $(id).disabled = busy || count < 1 || count > 5;
+  $("clear-history").disabled = busy || !historyRecords.length;
+  $("history-instruction").disabled = busy;
+  $("history-notice").textContent = (!historyStorageAvailable ? "浏览器未能保存历史；当前记录仅在本页保留，刷新后可能丢失。 " : "")
+    + (count > 5 ? "最多选择 5 条记录。" : `已选择 ${count} 条记录。`);
+  updateVersionLabel();
+}
+function restoreHistory(record) {
+  if (busy) return;
+  activeRecordId = record.id;
+  rememberActiveVersion(record.id);
+  lastQuestion = record.question;
+  lastResult = record.result;
+  selectedRecords = new Set([record.id]);
+  const settings = record.settings || {};
+  $("question").value = record.question;
+  $("as-of").value = settings.as_of || "";
+  $("version").value = settings.target_version || "";
+  $("language").value = settings.language || "zh";
+  $("rounds").value = String(settings.max_search_rounds || 2);
+  $("follow-up-question").value = "";
+  $("error").hidden = true;
+  render(lastResult);
+  renderHistory();
+  $("progress").textContent = `已返回版本 ${record.sequence}，显示当时的回答与来源，未重新联网。`;
+}
+async function rememberResult(question,result,payload,parentIds) {
+  const record = {
+    id: crypto.randomUUID(), sequence: Math.max(0,...historyRecords.map(r => r.sequence))+1,
+    createdAt: new Date().toISOString(), question, result,
+    parents: historyRecords.filter(r => parentIds.includes(r.id)).map(r => ({id:r.id,sequence:r.sequence,question:r.question})),
+    settings: {language:payload.language,as_of:payload.as_of,target_version:payload.target_version,max_search_rounds:payload.max_search_rounds},
+  };
+  const evicted = historyRecords.slice(19);
+  historyRecords = [record,...historyRecords].slice(0,20);
+  activeRecordId = record.id;
+  rememberActiveVersion(record.id);
+  selectedRecords = new Set([record.id]);
+  try {
+    await SearchHistory.save(record);
+    for (const item of evicted) await SearchHistory.remove(item.id);
+  } catch { historyStorageAvailable = false; }
+}
+async function loadHistory() {
+  try {
+    historyRecords = (await SearchHistory.list()).filter(r => r.id && r.result && Array.isArray(r.result.claims)
+      && Array.isArray(r.result.sources) && Array.isArray(r.result.limitations)).sort((a,b) => b.sequence-a.sequence).slice(0,20);
+    let previousId;
+    try { previousId = sessionStorage.getItem("ai-search-active-version"); } catch { previousId = null; }
+    if (!busy && !lastResult && historyRecords.length) restoreHistory(historyRecords.find(r => r.id === previousId) || historyRecords[0]);
+  } catch { historyStorageAvailable = false; }
+  renderHistory();
+}
 
 function el(tag, text, parent, cls) {
   const node = document.createElement(tag);
@@ -75,8 +176,10 @@ function renderFactEvidence(fact, sources, parent) {
 }
 function render(data) {
   const sources = new Map(data.sources.map(source => [source.id, source]));
-  $("answer").textContent = data.answer;
-  $("summary").textContent = `参考日期：${data.checked_as_of || "未提供"} · 目标版本：${data.target_version || "未限定"} · 搜索 ${data.search_rounds} 轮 · ${data.sources.length} 个来源`;
+  $("answer").replaceChildren();
+  $("summary").textContent = data.result_kind === "history_summary"
+    ? `历史总结 · 未重新联网 · 原记录参考日期：${(data.history_reference_dates || []).join("、") || "未提供"} · ${data.sources.length} 个来源`
+    : `参考日期：${data.checked_as_of || "未提供"} · 目标版本：${data.target_version || "未限定"} · 搜索 ${data.search_rounds} 轮 · ${data.sources.length} 个来源`;
   for (const id of ["claims","sources","groups","limitations"]) $(id).replaceChildren();
   if (!data.claims.length) el("p","没有形成可核验结论，请查看下方限制说明。",$("claims"));
   data.claims.forEach((claim,index) => {
@@ -96,7 +199,8 @@ function render(data) {
         renderFactEvidence(fact,sources,row);
       });
     } else el("p","本条没有逐条事实核验。",card,"muted");
-    const citations = details(`结论引用（${claim.evidence.length}）`,card);
+    const citations = details(`来源与原文（${claim.evidence.length}）`,card);
+    citations.open = true;
     if (!claim.evidence.length) el("p","暂无有效证据。",citations);
     claim.evidence.forEach(item => {
       sourceLink(sources.get(item.source_id),citations,item.source_id);
@@ -114,7 +218,20 @@ function render(data) {
       el("p","明确替代说明来源",time);
       temporal.replacement_source_ids.forEach(id => sourceLink(sources.get(id),el("p",null,time),id));
     }
+    const paragraph = el("p",null,$("answer"),"answer-paragraph");
+    const sentence = el("button",null,paragraph,"answer-sentence");
+    sentence.type = "button";
+    sentence.setAttribute("aria-haspopup","dialog");
+    el("span",claim.text,sentence,"sentence-text");
+    badge(claim.status,sentence);
+    sentence.title = "点击查看这条回答的来源、证据原文和判断依据";
+    sentence.addEventListener("click",() => {
+      $("evidence-content").replaceChildren(card.cloneNode(true));
+      $("evidence-title").textContent = `回答依据 · 第 ${index+1} 条`;
+      $("evidence-dialog").showModal();
+    });
   });
+  if (!data.claims.length) el("p","本次没有找到足够证据形成回答，请展开下方查询说明。",$("answer"));
   data.sources.forEach(source => {
     const card = el("article",null,$("sources"),"source");
     sourceLink(source,card);
@@ -146,22 +263,29 @@ function followUpContext() {
   lastResult.sources.forEach(source => parts.push(`- [${source.id}] ${source.title} ${source.url}`));
   return parts.join("\n").slice(0,6000);
 }
-async function runSearch(question, context = null, isFollowUp = false) {
+async function runSearch(question, context = null, isFollowUp = false, parentIds = null) {
   if (!question) return;
-  $("submit").disabled = true;
-  $("follow-up-submit").disabled = true;
-  $("error").hidden = true;
-  $("result").hidden = true;
-  if (!isFollowUp) lastResult = null;
-  $("progress").textContent = "正在等待检索与核验结果，最多等待约 3 分半钟。此处不会显示未由服务器确认的阶段进度。";
   const payload = {question,language:$("language").value,max_search_rounds:Number($("rounds").value)};
   if ($("as-of").value) payload.as_of = $("as-of").value;
   if ($("version").value.trim()) payload.target_version = $("version").value.trim();
   if (context) payload.follow_up_context = context;
+  return runRequest("/v1/ai-search",payload,question,parentIds || (isFollowUp && activeRecordId ? [activeRecordId] : []),isFollowUp);
+}
+async function runRequest(url,payload,question,parentIds,isFollowUp=false) {
+  if (busy) return;
+  busy = true;
+  renderHistory();
+  $("submit").disabled = true;
+  $("follow-up-submit").disabled = true;
+  $("error").hidden = true;
+  $("result").hidden = true;
+  $("progress").textContent = url.endsWith("/summarize")
+    ? "正在整理选中的历史证据，不会重新联网；最多等待约 3 分半钟。"
+    : "正在等待检索与核验结果，最多等待约 3 分半钟。";
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(),220000);
   try {
-    const response = await fetch("/v1/ai-search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),signal:controller.signal});
+    const response = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),signal:controller.signal});
     const data = await response.json();
     if (!response.ok) {
       let message = Array.isArray(data.detail) ? data.detail.map(item => `${item.loc.join(".")}：${item.msg}`).join("；") : data.detail;
@@ -172,20 +296,23 @@ async function runSearch(question, context = null, isFollowUp = false) {
       if (requestId) message += `（排查编号：${requestId}，已重试${retries || "0"}次）`;
       throw new Error(message || `请求失败（${response.status}）`);
     }
-    render(data);
+    await rememberResult(question,data,payload,parentIds);
     lastResult = data;
     lastQuestion = question;
-    $("progress").textContent = "查询完成。请结合逐条核验和限制说明阅读答案。";
+    render(data);
+    $("progress").textContent = "查询完成。点击回答中的句子可查看来源和核验依据。";
     if (isFollowUp) $("follow-up-question").value = "";
   } catch (error) {
     $("error").textContent = error.name === "AbortError" ? "等待超时，请稍后重新查询。" : `查询失败：${error.message}`;
     $("error").hidden = false;
     $("progress").textContent = "本次查询未完成。";
-    if (isFollowUp && lastResult) render(lastResult);
+    if (lastResult) render(lastResult);
   } finally {
     clearTimeout(timer);
     $("submit").disabled = false;
     $("follow-up-submit").disabled = false;
+    busy = false;
+    renderHistory();
   }
 }
 function downloadFile(name, content, type) {
@@ -280,3 +407,32 @@ $("download-feedback").addEventListener("click",() => {
   if (!lastResult) return;
   downloadFile("ai-search-feedback-case.json",JSON.stringify(feedbackDraft(),null,2),"application/json");
 });
+$("summarize-history").addEventListener("click",() => {
+  const records = chosenHistory();
+  if (busy || records.length < 1 || records.length > 5) return;
+  const instruction = $("history-instruction").value.trim();
+  const payload = {language:$("language").value,records:records.map(r => ({record_id:r.id,question:r.question,result:r.result}))};
+  if (instruction) payload.instruction = instruction;
+  runRequest("/v1/ai-search/summarize",payload,`历史总结：${instruction || records.map(r => r.question).join("；")}`.slice(0,2000),records.map(r => r.id));
+});
+$("search-history").addEventListener("click",() => {
+  const records = chosenHistory();
+  if (busy || records.length < 1 || records.length > 5) return;
+  const question = $("history-instruction").value.trim()
+    || `综合以下问题重新检索，整理整体情况、变化和分歧：${records.map(r => r.question).join("；")}`.slice(0,2000);
+  runSearch(question,SearchHistory.context(records),true,records.map(r => r.id));
+});
+$("clear-history").addEventListener("click",async () => {
+  if (busy) return;
+  try {
+    await SearchHistory.clear();
+    historyRecords = [];
+    selectedRecords.clear();
+    activeRecordId = null;
+    rememberActiveVersion(null);
+    renderHistory();
+  } catch {
+    $("history-notice").textContent = "清空历史失败，请稍后重试。";
+  }
+});
+loadHistory();
