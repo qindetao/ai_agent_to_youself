@@ -15,6 +15,7 @@ class SearchRequest(StrictModel):
     as_of: date | None = None
     target_version: str | None = Field(default=None, min_length=1, max_length=100)
     follow_up_context: str | None = Field(default=None, max_length=6000)
+    prefer_new: bool = False
 
 
 class Source(StrictModel):

@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .models import Assessment, Claim, Plan, Review, SearchRequest, SearchResponse, Source
 from .providers import ProviderError, retry_count_context
 from .provenance import group_sources
-from .authority import POLICY, clean_domains, source_identity, source_role, technical_search_profile
+from .authority import POLICY, clean_domains, source_identity, source_role, technical_search_profile, case_search_profile, is_encyclopedia, matches_domain
 from .temporal import TEMPORAL_INSTRUCTION, check_temporal, extract_reference_date
 
 LABELS = {
@@ -228,8 +228,16 @@ class SearchService:
         as_of = request.as_of or extract_reference_date(request.question) or datetime.now(timezone(timedelta(hours=8))).date()
         if request.as_of is None and extract_reference_date(request.question):
             request = request.model_copy(update={"as_of": as_of})
+        prefer_new = bool(request.prefer_new and request.follow_up_context)
+        novelty_instruction = (
+            "这是补查。把历史上下文用作对照，优先找未覆盖的事实、后续进展，或能独立核实、纠正旧结论的新证据。"
+            "新进展按事件日期判断。相同事实改写、同一文件转载或旧消息重发不算新发现。"
+            "除非用户明确要求回顾，只保留回答当前问题所需的最少背景。没有找到能核实的新内容时可返回空claims，不要凑数。"
+            if prefer_new else ""
+        )
         temporal_context = {"as_of": as_of.isoformat(), "target_version": request.target_version}
         technical_query, technical_domains, official_doc_query = technical_search_profile(request.question)
+        case_query, judicial_domains, judicial_query = case_search_profile(request.question)
         limitations = [
             "自动核验仅评估已检索证据；不保证事实正确，同源转载不算独立佐证。"
             if request.language == "zh" else
@@ -250,21 +258,22 @@ class SearchService:
             "没有找到对应版本文档时，保留该缺口，不要拿新版文档推断旧版行为。"
             "生成最多6个与问题直接相关的preferred_domains，只写裸域名。"
             "可从known_domains选择；无相关域名时可建议其他真实机构官网，不能编造，不确定则返回空数组。"
+            "案件问题按实际司法管辖地搜索法院、检察机关或司法部门的原始文件，并保留一组主流媒体检索；不确定国家时不能默认美国或中国。"
             "至少一个搜索词以官方原始资料为目标，保留互补检索以发现独立评测或反面证据。"
-            "价格、新闻、当前API能力、版本差异等问题优先搜索官方更新、版本文档和明确生效日期。",
+            "价格、新闻、当前API能力、版本差异等问题优先搜索官方更新、版本文档和明确生效日期。" + novelty_instruction,
             {"question": request.question, "current_date": datetime.now(timezone.utc).isoformat(),
              "known_domains": POLICY, **temporal_context,
              "follow_up_context": request.follow_up_context,
              "time_search_hint": "以as_of为参考日期；指定target_version时检索对应版本文档，不自动替换成最新版本；需要最新信息时查官方更新或更正公告。"}, Plan,
         )
-        preferred_domains = clean_domains([*technical_domains, *plan.preferred_domains])
+        preferred_domains = clean_domains([*technical_domains, *judicial_domains, *plan.preferred_domains])
         sources: list[Source] = []
         source_groups = []
         seen_urls: set[str] = set()
         seen_queries: set[str] = set()
         queries = list(plan.queries)
         overview_query = None
-        if (not technical_query
+        if (not technical_query and not prefer_new
                 and re.search(r"案件|事件|(?<!方)(?<!档)案|\bcase\b", request.question, re.IGNORECASE)
                 and re.search(r"介绍|信息|了解|概览|概况|讲讲|是什么|前因后果|来龙去脉|\b(overview|information|explain)\b", request.question, re.IGNORECASE)):
             overview_query = (request.question[:180] + " 案件背景 核心指控 起诉 判决 官方资料")[:400]
@@ -273,6 +282,12 @@ class SearchService:
             if request.target_version and request.target_version not in official_doc_query:
                 official_doc_query += f" {request.target_version}"
             queries = list(dict.fromkeys([official_doc_query, *queries]))[:3]
+        if judicial_query and not technical_query:
+            if not prefer_new:
+                queries = list(dict.fromkeys([judicial_query, *queries]))[:3]
+            elif judicial_domains and queries and not any("site:" in query for query in queries):
+                sites = " OR ".join(f"site:{domain}" for domain in judicial_domains)
+                queries = [f"{queries[0][:300]} ({sites})", *queries][:3]
         assessment = Assessment(claims=[])
         rounds = 0
         for _ in range(request.max_search_rounds):
@@ -312,11 +327,33 @@ class SearchService:
                     relevance = 0.0
                 # Search score helps rank topicality; domain priority only breaks close ties.
                 role = source_role(url)
+                if case_query and not technical_query:
+                    kind = source_identity(url, preferred_domains)[0]
+                    tier = 0 if kind in ('official', 'institution') else 1 if kind == 'authoritative_media' else 3 if is_encyclopedia(url) else 2
+                    return tier * 10 - relevance
                 documentation_boost = 0.55 if technical_query and role == "official_document" else 0.18 if technical_query and role == "official_announcement" else 0.0
                 community_penalty = 0.22 if technical_query and role == "official_community" else 0.0
                 return -relevance - documentation_boost + community_penalty + 0.08 * source_identity(url, preferred_domains)[2]
 
-            candidates = sorted(pool.items(), key=candidate_rank)[:min(SOURCES_PER_ROUND, MAX_SOURCES - len(sources))]
+            ranked = sorted(pool.items(), key=candidate_rank)
+            if case_query and not technical_query:
+                # One encyclopedia page at most across the entire search, as background.
+                encyclopedia_used = any(is_encyclopedia(source.url) for source in sources)
+                filtered = []
+                for pair in ranked:
+                    if is_encyclopedia(pair[0]):
+                        if encyclopedia_used:
+                            continue
+                        encyclopedia_used = True
+                    filtered.append(pair)
+                ranked = filtered
+                background_urls &= {url for url, _ in ranked}
+                credible_background = {url for url in background_urls if source_identity(url, preferred_domains)[0] in ('official', 'institution', 'authoritative_media')}
+                if credible_background:
+                    background_urls = credible_background
+                elif sum(source_identity(url, preferred_domains)[0] in ('official', 'institution', 'authoritative_media') for url, _ in ranked) >= SOURCES_PER_ROUND:
+                    background_urls = set()
+            candidates = ranked[:min(SOURCES_PER_ROUND, MAX_SOURCES - len(sources))]
             if candidates and background_urls and not any(url in background_urls for url, _ in candidates):
                 background = min(((url, pool[url]) for url in background_urls), key=candidate_rank)
                 candidates[-1] = background
@@ -369,6 +406,7 @@ class SearchService:
                 "不要把一个引用笼统地用于整条复合结论。quote至少12个字符，必须来自提供的content；引用上下文必须直接支持对应事实，文字匹配本身不等于语义支持。"
                 "区分事实与推断，考虑发布日期和模型版本。厂商自报成绩要标明自报。"
                 "默认引用与问题相关的official/institution原始资料，权威媒体作为补充。"
+                "案件核心事实优先引用法院、检察或司法机关文件，主流媒体补充背景和不同观点，百科仅补充背景。机构或国家背景不等于内容正确，也不代表所有国民观点。严格区分指控、起诉、裁定、判决及媒体转述；未取得判决原文时明确说明，不暗示没有判决。"
                 "技术问题优先引用与目标版本匹配的official_document；中文问题优先使用中文官方文档页面（若已检索到）；official_community是官方论坛或社区，不等同于正式文档。"
                 "source_role描述页面类型，source_type描述域名所属身份，两者都不等于事实正确。preferred_unverified不得称为已确认官网。"
                 "arXiv预印本不代表已同行评审。不得因为来源是官方就忽略内容冲突或独立反证。"
@@ -378,7 +416,7 @@ class SearchService:
                 "正文相似不能证明谁是原作者或转载方向。单份一手资料可以支持直接事实，"
                 "但若结论需要独立佐证却只有一个证据组，标记partial并补充搜索。"
                 "只有摘要时不得标为supported。证据不足时提出最多2条补充搜索词；充分时返回空数组。"
-                "text和reason用请求指定语言。reason只解释最终status，不保留与最终status矛盾的旧判断。" + TEMPORAL_INSTRUCTION,
+                "text和reason用请求指定语言。reason只解释最终status，不保留与最终status矛盾的旧判断。" + TEMPORAL_INSTRUCTION + novelty_instruction,
                 {"question": request.question, "follow_up_context": request.follow_up_context, "language": request.language,
                  "sources": [s.model_dump() for s in sources], **temporal_context}, Assessment,
             )
@@ -389,7 +427,7 @@ class SearchService:
                 queries = [f"{request.question[:250]} {request.target_version or ''} 官方 更新日志 生效日期 {as_of.isoformat()}"]
             if not queries:
                 break
-        if sources:
+        if sources and (assessment.claims or not prefer_new):
             review = await complete(
                 "你是证据审核员。检查待审核结论与引用是否匹配，包括数值、日期、适用范围和来源独立性。"
                 "follow_up_context不是证据；只根据本轮检索来源审核结论。"
@@ -405,7 +443,7 @@ class SearchService:
                 "保留概览的阅读顺序：先直接回答或交代背景，再解释关键事实和进展；每条text尽量只写一句，让全部text连起来通顺，核验说明只写在reason。"
                 "对案件概览保留有证据支持的核心背景作为开头，再给司法经过和近期进展，不把文件发布数量放在案件介绍之前。"
                 "返回审核后的claims，每条引用提供的来源ID和正文逐字quote，至少12个字符。"
-                "证据不足保留insufficient并明确说明；text和reason用请求指定语言。" + TEMPORAL_INSTRUCTION,
+                "证据不足保留insufficient并明确说明；text和reason用请求指定语言。" + TEMPORAL_INSTRUCTION + novelty_instruction,
                 {"question": request.question, "follow_up_context": request.follow_up_context, "language": request.language,
                  "claims": [c.model_dump(mode="json") for c in assessment.claims],
                  "sources": review_source_contexts(assessment.claims, sources), **temporal_context}, Review,
@@ -414,6 +452,7 @@ class SearchService:
             claims = check_temporal(claims, sources, request, as_of)
         else:
             claims = []
+        if not sources:
             limitations.append("未取得可用来源。" if request.language == "zh" else "No usable sources were retrieved.")
         if any(c.status != "supported" for c in claims):
             limitations.append("部分结论未得到充分支持，请查看逐条核验结果。" if request.language == "zh" else "Some claims lack full support; see individual assessments.")
@@ -421,6 +460,9 @@ class SearchService:
             limitations.append("检测到正文高度相似的来源，可能同源，已合并证据组。" if request.language == "zh" else "Highly similar sources may share an origin and were grouped together.")
         if sources:
             limitations.append("网页日期是供应商估计的发布或更新时间，抓取时间不代表信息生效；未发现更新也不能证明内容是最新。" if request.language == "zh" else "Page dates are provider estimates of publication or update; retrieval time is not an effective date. Absence of updates does not establish freshness.")
+            judicial_found = any(any(matches_domain((urlsplit(source.url).hostname or ""), domain) for domain in (judicial_domains or ["court.gov.cn", "spp.gov.cn", "uscourts.gov", "justice.gov"])) for source in sources)
+            if case_query and not judicial_found:
+                limitations.append("本次未取得已登记司法机关网站的资料；媒体或百科报道不能替代起诉书、裁定或判决原文，也不能据此认定案件没有判决。")
             if not any(s.source_type in ("official", "institution") for s in sources):
                 limitations.append("本次未取得域名规则确认的官方或机构来源；当前答案使用补充资料，需继续核对原始公告。" if request.language == "zh" else "No official or institutional source was identified by domain rules; consult original announcements to verify supplementary sources.")
             limitations.append(
@@ -428,8 +470,12 @@ class SearchService:
                 if request.language == "zh" else
                 "Grouping compares extracted text only. Snippets, short pages, paraphrases, translations and truncation can cause missed matches; shared templates can cause false matches. Different groups do not guarantee independence."
             )
+        answer = render_answer(claims, request.language)
+        if prefer_new and not claims:
+            answer = ("本次未找到可核实的新内容。"
+                      if request.language == "zh" else "This search found no verifiable new information.")
         return SearchResponse(
-            answer=render_answer(claims, request.language), claims=claims, sources=sources,
+            answer=answer, claims=claims, sources=sources,
             limitations=list(dict.fromkeys(limitations)), search_rounds=rounds,
             usage={**usage, "retry_count": retry_count_context.get()[0] - retry_count_before},
             source_groups=source_groups,

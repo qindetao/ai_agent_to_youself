@@ -127,3 +127,23 @@ def source_identity(url: str, preferred_domains: list[str]) -> tuple[str, str, i
     if any(matches_domain(host, d) for d in preferred_domains):
         return "preferred_unverified", "命中优先检索域名，但尚未由域名规则确认机构身份。", 2
     return "unclassified", "尚未确认机构身份，作为补充来源核验。", 3
+
+
+def case_search_profile(question: str) -> tuple[bool, list[str], str | None]:
+    """Only select jurisdiction domains when the question identifies the jurisdiction."""
+    legal = bool(re.search(r"案件|法院|判决|起诉|检察|诉讼|爱泼斯坦|\b(case|court|indictment|epstein)\b", question, re.IGNORECASE))
+    if not legal:
+        return False, [], None
+    domains = []
+    if re.search(r"美国|爱泼斯坦|\b(US|USA|United States|Epstein)\b", question, re.IGNORECASE):
+        domains = ['uscourts.gov', 'justice.gov']
+    elif re.search(r"中国|我国|最高人民|人民法院|人民检察院", question):
+        domains = ['court.gov.cn', 'spp.gov.cn']
+    sites = ' OR '.join('site:' + domain for domain in domains)
+    suffix = f' ({sites})' if sites else ''
+    return True, domains, question[:180] + ' 法院 检察机关 起诉书 裁定 判决 court indictment judgment' + suffix
+
+
+def is_encyclopedia(url: str) -> bool:
+    host = (urlsplit(url).hostname or '').lower()
+    return any(matches_domain(host, domain) for domain in ('wikipedia.org', 'baike.baidu.com', 'baike.com'))

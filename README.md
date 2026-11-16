@@ -171,3 +171,5 @@ python -m unittest discover -s tests -v
 - Tavily Search：https://docs.tavily.com/documentation/api-reference/endpoint/search
 - Tavily Extract：https://docs.tavily.com/documentation/api-reference/endpoint/extract
 
+
+案件查询会增加司法原始资料专项检索；仅在问题明确管辖地时使用对应的已登记司法域名。候选来源优先选取相关官方/机构资料及主流媒体，百科每次查询最多保留一篇作为背景。媒体机构身份不等同于事实正确；起诉、裁定和判决需区分，没有取得司法文件时会提示资料缺口。旧历史记录保留原快照，需重新搜索才能使用新筛选规则。

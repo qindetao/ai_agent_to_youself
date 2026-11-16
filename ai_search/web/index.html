@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AI 搜索助手</title>
-  <link rel="stylesheet" href="/static/style.css?v=history-20261103-1">
-  <script src="/static/history.js?v=history-20261103-1" defer></script>
-  <script src="/static/app.js?v=history-20261103-1" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=search-ux-5">
+  <script src="/static/history.js?v=search-ux-5" defer></script>
+  <script src="/static/app.js?v=search-ux-5" defer></script>
 </head>
 <body>
 <main>
@@ -18,34 +18,40 @@
       <label>参考日期<input id="as-of" type="date"><small>留空使用北京时间当天</small></label>
       <label>目标版本<input id="version" maxlength="100" placeholder="可选，例如 3.10"></label>
       <label>回答语言<select id="language"><option value="zh">中文</option><option value="en">English</option></select></label>
-      <label>搜索轮数<select id="rounds"><option value="2">最多 2 轮</option><option value="1">最多 1 轮</option></select></label>
+      <label>搜索方式<select id="rounds"><option value="1">快速查找</option><option value="2">深入核验</option></select><small>深入核验可在证据不足时再查一轮</small></label>
     </div>
-    <button id="submit" type="submit">搜索并核验</button>
+    <button id="submit" type="submit" aria-describedby="new-search-hint">搜索并核验</button>
+    <small id="new-search-hint">从这里提问会开始一次新查询，并新建一条历史记录。</small>
+    <div class="request-actions">
+      <span id="elapsed" class="muted" hidden></span>
+      <button id="cancel-request" class="secondary" type="button" hidden>取消等待</button>
+      <button id="retry-quick" class="secondary" type="button" hidden>用快速查找重试</button>
+      <button id="retry-request" class="secondary" type="button" hidden>重试上次请求</button>
+    </div>
     <p id="progress" role="status" aria-live="polite"></p>
     <p id="error" role="alert" hidden></p>
   </form>
-  <section id="history-panel" class="history-panel" aria-labelledby="history-title">
-    <div class="section-title"><h2 id="history-title">搜索历史</h2><button id="clear-history" type="button" class="secondary">清空历史</button></div>
-    <p class="muted">自动保存最近 20 个版本到当前浏览器。可随时返回旧版，或选择 1–5 条一起整理。</p>
-    <p id="history-notice" role="status" class="muted"></p>
-    <div id="history-list"></div>
-    <label for="history-instruction">整理要求或下一步问题</label>
-    <textarea id="history-instruction" rows="2" maxlength="2000" placeholder="可留空，例如：把这些资料整理成时间线，指出不同版本的变化"></textarea>
-    <div class="history-actions"><button id="summarize-history" type="button" class="secondary" disabled>总结选中记录</button><button id="search-history" type="button" class="secondary" disabled>结合选中记录重新搜索</button></div>
-    <small>直接总结仅调用模型整理历史证据；重新搜索会联网核验。两种结果都会另存为新版本。</small>
-  </section>
   <section id="result" hidden aria-label="查询结果">
-    <div class="section-title"><h2>查询结果</h2><div><button id="download-markdown" type="button" class="secondary">导出 Markdown</button> <button id="download" type="button" class="secondary">下载结果 JSON</button></div></div>
+    <div class="section-title"><h2 id="result-title" tabindex="-1">查询结果</h2><div class="action-row"><button id="copy-answer" type="button" class="secondary">复制答案和出处</button><button id="download-markdown" type="button" class="secondary">导出 Markdown</button> <button id="download" type="button" class="secondary">下载结果 JSON</button></div></div>
+    <p id="result-question"></p>
     <p id="summary" class="muted"></p>
     <p id="current-version" class="muted"></p>
+    <nav id="version-list" class="action-row" aria-label="当前查询的版本" hidden></nav>
+    <p id="copy-status" role="status" class="muted"></p>
+    <textarea id="copy-text" aria-label="可手动复制的答案" rows="5" readonly hidden></textarea>
     <p class="answer-hint">句末标记表示证据支持程度。点击任意一句，查看来源与原文依据。</p>
     <div id="answer" class="answer" aria-label="回答"></div>
     <div id="claims" hidden></div>
+    <div id="deeper-search" class="deeper-search" hidden>
+      <span>这次查到的证据还不够充分。</span>
+      <button id="deeper-submit" type="button" class="secondary">用深入核验再查一次</button>
+    </div>
     <form id="follow-up-form" class="follow-up-form">
       <label for="follow-up-question">继续追问</label>
-      <textarea id="follow-up-question" maxlength="2000" rows="2" placeholder="例如：刚才提到的参数在 Windows 上也一样吗？"></textarea>
-      <button id="follow-up-submit" type="submit" class="secondary">结合上次结果重新搜索</button>
-      <small>上一轮内容只用于理解你的追问；新回答会重新检索来源，不会把旧回答当证据。</small>
+      <div id="suggested-questions" class="action-row" aria-label="一键追问"></div>
+      <textarea id="follow-up-question" maxlength="2000" rows="2" placeholder="可留空，默认查找新的进展、事实或证据"></textarea>
+      <button id="follow-up-submit" type="submit" class="secondary" aria-describedby="follow-up-hint">结合上次结果重新搜索</button>
+      <small id="follow-up-hint">结合当前查询的历史版本继续查找。默认优先补查新内容，结果保存在同一条历史里。</small>
     </form>
     <details><summary>全部来源</summary><div id="sources"></div></details>
     <details><summary>来源关系</summary><p class="muted">高度相似的网页可能同源；不同组也不保证相互独立。</p><div id="groups"></div></details>
@@ -58,6 +64,16 @@
     </details>
     <details><summary>查看调用统计</summary><pre id="usage"></pre></details>
   </section>
+  <details id="history-panel" class="history-panel">
+    <summary id="history-title">查看历史（0）</summary>
+    <div class="section-title"><h2>搜索历史</h2><button id="clear-history" type="button" class="secondary">清空历史</button></div>
+    <p class="muted">点击题目查看这次查询的各个版本。浏览器保留最近 20 个版本。</p>
+    <p id="history-notice" role="status" class="muted"></p>
+    <label for="history-filter">查找历史记录</label>
+    <input id="history-filter" type="search" placeholder="输入问题、案件名或关键词">
+    <p id="star-status" role="status" class="muted"></p>
+    <div id="history-list"></div>
+  </details>
   <footer>完整服务测试页面 · <a href="/docs">接口文档</a></footer>
 </main>
 <dialog id="evidence-dialog" aria-labelledby="evidence-title">
